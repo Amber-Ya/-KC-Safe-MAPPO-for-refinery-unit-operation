@@ -81,15 +81,18 @@ class MAPPORolloutBuffer:
         old_log_probs = np.asarray(self.log_probs, dtype=np.float32)
         advantages = self.advantages.astype(np.float32)
         returns = self.returns.astype(np.float32)
+        old_values = np.asarray(self.values, dtype=np.float32)
 
         flat_agent_ids = np.tile(np.arange(self.num_agents), self.size)
         agent_onehot = np.eye(self.num_agents, dtype=np.float32)[flat_agent_ids]
+        flat_states = np.repeat(states, self.num_agents, axis=0)
         flat_obs = obs.reshape(self.size * self.num_agents, self.obs_dim)
         flat_actions = actions.reshape(self.size * self.num_agents)
         flat_masks = masks.reshape(self.size * self.num_agents, self.action_dim)
         flat_log_probs = old_log_probs.reshape(self.size * self.num_agents)
         flat_advantages = advantages.reshape(self.size * self.num_agents)
-        flat_returns = returns.reshape(self.size * self.num_agents)
+        flat_critic_returns = np.repeat(returns.mean(axis=1), self.num_agents)
+        flat_old_values = np.repeat(old_values, self.num_agents)
         norm_adv = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
 
         return {
@@ -99,7 +102,7 @@ class MAPPORolloutBuffer:
             "action_masks": torch.as_tensor(flat_masks, device=device),
             "old_log_probs": torch.as_tensor(flat_log_probs, device=device),
             "advantages": torch.as_tensor(norm_adv, device=device),
-            "returns": torch.as_tensor(flat_returns, device=device),
-            "states": torch.as_tensor(states, device=device),
-            "critic_returns": torch.as_tensor(returns.mean(axis=1), device=device),
+            "states": torch.as_tensor(flat_states, device=device),
+            "critic_returns": torch.as_tensor(flat_critic_returns, device=device),
+            "old_values": torch.as_tensor(flat_old_values, device=device),
         }

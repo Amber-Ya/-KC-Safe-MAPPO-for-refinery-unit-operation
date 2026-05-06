@@ -61,6 +61,10 @@ class RefinerySchedulingEnv:
             "last_actions": {agent: 1 for agent in self.agents},
             "switch_flags": {agent: 0.0 for agent in self.agents},
             "cumulative_delivery": {pool: 0.0 for pool in self.config["product_pools"]},
+            "cumulative_product_sales": {
+                product: 0.0
+                for product in self.config.get("prices", {}).get("product_grades", {})
+            },
         }
         obs = {agent: self.build_observation(agent) for agent in self.agents}
         self.obs_dim = len(next(iter(obs.values())))
@@ -77,11 +81,13 @@ class RefinerySchedulingEnv:
 
         routing_info = self.router.route(self.state, safe_loads)
         demand = self._current_demand()
+        demand_max = self._current_demand_max()
         blend_state = {
             "inventories": routing_info["inventories"],
             "product_pools": self.state["product_pools"],
+            "cumulative_product_sales": self.state["cumulative_product_sales"],
         }
-        blending_info = self.blender.blend(blend_state, demand)
+        blending_info = self.blender.blend(blend_state, demand, demand_max)
 
         actual_loads = routing_info["actual_loads"]
         switch_flags = {
@@ -98,6 +104,7 @@ class RefinerySchedulingEnv:
             "product_pools": blending_info["product_pools"],
             "shortage": blending_info["shortage"],
             "product_delivery": blending_info["product_delivery"],
+            "product_sales": blending_info["product_sales"],
             "crude_purchase": routing_info["crude_purchase"],
             "violation_count": routing_info["violation_count"],
             "blocked_load_by_unit": blocked_by_unit,
@@ -114,6 +121,8 @@ class RefinerySchedulingEnv:
         self.state["switch_flags"] = switch_flags
         for pool, amount in blending_info["product_delivery"].items():
             self.state["cumulative_delivery"][pool] += float(amount)
+        for product, amount in blending_info["product_sales"].items():
+            self.state["cumulative_product_sales"][product] += float(amount)
 
         done = self.state["t"] >= self.horizon
         next_obs = {agent: self.build_observation(agent) for agent in self.agents}
@@ -128,6 +137,7 @@ class RefinerySchedulingEnv:
             "inventories": blending_info["inventories"],
             "product_pools": blending_info["product_pools"],
             "product_delivery": blending_info["product_delivery"],
+            "product_sales": blending_info["product_sales"],
             "shortage": blending_info["shortage"],
             "demand": demand,
             "demand_satisfaction_rate": blending_info["demand_satisfaction_rate"],
@@ -182,9 +192,23 @@ class RefinerySchedulingEnv:
 
     def _current_demand(self) -> Dict[str, float]:
         demand = {pool: 0.0 for pool in self.config["product_pools"]}
+        remaining_periods = max(1, self.horizon - int(self.state.get("t", 0)))
         for group in self.config.get("demands", {}).values():
-            demand[group["pool"]] += float(group.get("per_period_min", 0.0))
+            pool = group["pool"]
+            total_min = float(group.get("base_min_total", 0.0))
+            already_delivered = float(self.state.get("cumulative_delivery", {}).get(pool, 0.0))
+            demand[pool] += max(0.0, total_min - already_delivered) / remaining_periods
         return demand
+
+    def _current_demand_max(self) -> Dict[str, float]:
+        """Remaining delivery budget per pool (mirrors MILP horizon-total demand_max)."""
+        demand_max = {pool: float("inf") for pool in self.config["product_pools"]}
+        for group in self.config.get("demands", {}).values():
+            pool = group["pool"]
+            total_max = float(group.get("demand_max_total", float("inf")))
+            already_delivered = self.state.get("cumulative_delivery", {}).get(pool, 0.0)
+            demand_max[pool] = max(0.0, total_max - already_delivered)
+        return demand_max
 
     def _local_context(self, agent_id: str) -> tuple[list[str], list[str], list[str], list[str]]:
         if agent_id in ("CDU1", "CDU2"):

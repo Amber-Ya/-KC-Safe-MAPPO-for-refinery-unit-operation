@@ -28,3 +28,28 @@ def test_component_blending_balance_for_one_step() -> None:
     outflow = sum(v for (src, dst), v in info["blend_flows"].items() if src == "gasoline_component_pool")
     new_gasoline_component = info["inventories"]["gasoline_component_pool"]
     assert abs(new_gasoline_component - (old_gasoline_component + inflow - outflow)) <= 1e-6
+
+
+def test_product_grade_sales_respect_real_caps_not_big_m() -> None:
+    env = RefinerySchedulingEnv(ConfigAdapter(config).build_env_config(), seed=7)
+    env.reset(seed=7)
+    done = False
+    while not done:
+        _, _, dones, _ = env.step({agent: 6 for agent in env.agents})
+        done = dones["__all__"]
+
+    sales = env.state["cumulative_product_sales"]
+    assert sales["W95"] <= config.CASE_DATA["product_grades"]["W95"]["demand_max"] + 1e-6
+    assert sales["STR"] <= config.CASE_DATA["product_grades"]["STR"]["demand_max"] + 1e-6
+    assert sales["W92"] > config.BIG_M
+
+
+def test_reward_revenue_uses_grade_level_sales_prices() -> None:
+    env = RefinerySchedulingEnv(ConfigAdapter(config).build_env_config(), seed=8)
+    env.reset(seed=8)
+    _, _, _, info = env.step({agent: 6 for agent in env.agents})
+    expected_revenue = sum(
+        amount * config.CASE_DATA["product_grades"][product]["price"]
+        for product, amount in info["product_sales"].items()
+    )
+    assert abs(info["revenue"] - expected_revenue) <= 1e-6

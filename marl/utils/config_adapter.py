@@ -44,8 +44,28 @@ class ConfigAdapter:
     def get_demands(self) -> Dict[str, Dict[str, Any]]:
         time_horizon = max(1, int(self.data["time"]["num_periods"]))
         groups = deepcopy(self.data.get("demand_groups", {}))
+        product_grades = self.data.get("product_grades", {})
+        big_m = float(getattr(self.config, "BIG_M", 100.0))
         for group in groups.values():
             group["per_period_min"] = float(group.get("base_min_total", 0.0)) / time_horizon
+            # Pool-level fallback cap.  A BIG_M demand_max means "unbounded" in
+            # the MILP, so one unbounded product keeps the aggregate pool open.
+            pool = group.get("pool", "")
+            pool_grades = [
+                pg for pg in product_grades.values()
+                if pg.get("pool") == pool
+            ]
+            finite_caps = [
+                float(pg.get("demand_max", big_m))
+                for pg in pool_grades
+                if float(pg.get("demand_max", big_m)) < 0.999 * big_m
+            ]
+            pool_demand_max_total = (
+                sum(finite_caps)
+                if len(finite_caps) == len(pool_grades)
+                else float("inf")
+            )
+            group["demand_max_total"] = pool_demand_max_total
         return groups
 
     def get_prices(self) -> Dict[str, Any]:
@@ -109,5 +129,6 @@ class ConfigAdapter:
             "crude_supply": deepcopy(self.data.get("crude_supply", {})),
             "crude_purchase_max_per_period": crude_supply_max,
             "crude_average_price": crude_avg_price,
+            "big_m": float(getattr(self.config, "BIG_M", 100.0)),
             "unit_order": ["CDU1", "CDU2", "DFHC", "FCC1", "FCC2", "ROHU", "DHC"],
         }

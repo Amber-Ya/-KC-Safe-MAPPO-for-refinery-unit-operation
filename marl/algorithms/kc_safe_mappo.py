@@ -48,6 +48,7 @@ class KCSafeMAPPOTrainer:
         self.critic = CentralizedCritic(self.state_dim, hidden_dim).to(self.device)
         params = list(self.actor.parameters()) + list(self.critic.parameters())
         self.optimizer = torch.optim.Adam(params, lr=float(self.config["learning_rate"]))
+        self._current_entropy_coef = float(self.config["entropy_coef"])
         self.last_losses: Dict[str, float] = {}
 
     def select_actions(self, obs: Mapping[str, np.ndarray]) -> Dict[str, Any]:
@@ -162,8 +163,18 @@ class KCSafeMAPPOTrainer:
                 actor_loss = -torch.min(ratio * adv, clipped).mean()
                 entropy = dist.entropy().mean()
 
-                values = self.critic(tensors["states"])
-                critic_loss = nn.functional.mse_loss(values, tensors["critic_returns"])
+                values = self.critic(tensors["states"][idx])
+                old_values = tensors["old_values"][idx]
+                returns = tensors["critic_returns"][idx]
+                value_clip = float(self.config.get("value_clip_param", self.config["clip_param"]))
+                values_clipped = old_values + torch.clamp(
+                    values - old_values,
+                    -value_clip,
+                    value_clip,
+                )
+                value_loss = (values - returns).pow(2)
+                value_loss_clipped = (values_clipped - returns).pow(2)
+                critic_loss = 0.5 * torch.max(value_loss, value_loss_clipped).mean()
                 loss = (
                     actor_loss
                     + float(self.config["value_loss_coef"]) * critic_loss

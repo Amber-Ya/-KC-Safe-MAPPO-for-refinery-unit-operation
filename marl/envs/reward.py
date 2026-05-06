@@ -12,13 +12,11 @@ class RewardCalculator:
     comparable in magnitude to the MILP objective (profit maximisation).
 
     Key design decisions:
-    - Revenue uses pool-average product prices × delivery amounts.
+    - Revenue uses grade-level product prices × allocated product sales.
     - Crude cost uses purchase volume × average crude price.
     - Energy cost uses per-unit utility cost coefficients (same as MILP).
-    - Inventory cost uses a **scaled** version of the MILP holding cost so that
-      the per-step penalty does not dominate revenue.  The scale factor is
-      ``1 / horizon`` because the MILP's objective sums inventory cost over the
-      full horizon while RL accumulates it step by step.
+    - Inventory cost is accumulated per step, matching the MILP holding-cost
+      summation over the horizon.
     - Shortage and violation penalties are tunable soft-constraint terms.
     """
 
@@ -44,12 +42,21 @@ class RewardCalculator:
         product_pools_state = transition_info["product_pools"]
         shortage = transition_info["shortage"]
         product_delivery = transition_info.get("product_delivery", {})
+        product_sales = transition_info.get("product_sales", {})
 
         # --- Revenue ---
-        revenue = sum(
-            float(product_delivery.get(pool, 0.0)) * float(self.product_pool_prices.get(pool, 0.0))
-            for pool in self.product_pools
-        )
+        if product_sales:
+            product_grades = self.config.get("prices", {}).get("product_grades", {})
+            revenue = sum(
+                float(product_sales.get(product, 0.0))
+                * float(product_grades.get(product, {}).get("price", 0.0))
+                for product in product_grades
+            )
+        else:
+            revenue = sum(
+                float(product_delivery.get(pool, 0.0)) * float(self.product_pool_prices.get(pool, 0.0))
+                for pool in self.product_pools
+            )
 
         # --- Costs ---
         crude_cost = float(transition_info.get("crude_purchase", 0.0)) * float(
@@ -66,21 +73,18 @@ class RewardCalculator:
             float(v) for v in shortage.values()
         )
 
-        # Inventory holding cost – scaled by 1/horizon so per-step magnitude
-        # is proportionate to per-step revenue.
-        inv_scale = 1.0 / self.horizon
+        # Inventory holding cost – full per-step cost (matching MILP where
+        # inventory_cost × inventory_level is summed for every period).
         inventory_penalty = 0.0
         for node, amount in inventories.items():
             inventory_penalty += (
                 float(self.inventory_nodes[node].get("inventory_cost", 0.0))
                 * float(amount)
-                * inv_scale
             )
         for pool, amount in product_pools_state.items():
             inventory_penalty += (
                 float(self.product_pools[pool].get("inventory_cost", 0.0))
                 * float(amount)
-                * inv_scale
             )
 
         violation_penalty = self.reward_config["violation_cost"] * float(
@@ -93,7 +97,8 @@ class RewardCalculator:
         )
         profit = revenue - total_cost
         reward_scale = max(1.0, float(self.reward_config.get("reward_scale", 1.0)))
-        global_reward = profit / reward_scale
+        efficiency_bonus = self._crude_efficiency_bonus(revenue, crude_cost)
+        global_reward = (profit + efficiency_bonus) / reward_scale
 
         # --- Per-agent local rewards ---
         local_rewards: Dict[str, float] = {}
@@ -116,6 +121,8 @@ class RewardCalculator:
             "global_reward": global_reward,
             "revenue": revenue,
             "profit": profit,
+            "reward_profit": profit + efficiency_bonus,
+            "crude_efficiency_bonus": efficiency_bonus,
             "total_cost": total_cost,
             "crude_cost": crude_cost,
             "energy_cost": energy_cost,
@@ -125,3 +132,9 @@ class RewardCalculator:
             "violation_penalty": violation_penalty,
         }
         return rewards, metrics
+
+    def _crude_efficiency_bonus(self, revenue: float, crude_cost: float) -> float:
+        coef = float(self.reward_config.get("crude_efficiency_bonus", 0.0))
+        if coef <= 0.0 or crude_cost <= 1e-8:
+            return 0.0
+        return coef * max(0.0, revenue / crude_cost - 1.0)

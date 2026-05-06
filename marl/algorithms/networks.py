@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 from torch.distributions import Categorical
@@ -14,11 +16,15 @@ class SharedActor(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(obs_dim + agent_id_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, action_dim),
         )
+        self.apply(_orthogonal_init)
+        _orthogonal_init(self.net[-1], gain=0.01)
 
     def forward(
         self,
@@ -57,11 +63,21 @@ class CentralizedCritic(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(global_state_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, 1),
         )
+        self.apply(_orthogonal_init)
+        _orthogonal_init(self.net[-1], gain=1.0)
 
     def forward(self, global_state: torch.Tensor) -> torch.Tensor:
         return self.net(global_state).squeeze(-1)
+
+
+def _orthogonal_init(module: nn.Module, gain: float = math.sqrt(2.0)) -> None:
+    if isinstance(module, nn.Linear):
+        nn.init.orthogonal_(module.weight, gain=gain)
+        nn.init.constant_(module.bias, 0.0)

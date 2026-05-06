@@ -8,6 +8,7 @@ ALGO_CONFIG = {
     "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_param": 0.2,
+    "value_clip_param": 0.2,
     "entropy_coef": 0.05,
     "value_loss_coef": 0.5,
     "learning_rate": 3e-4,
@@ -28,9 +29,10 @@ REWARD_CONFIG = {
     # At 8000/unit → ~245K, well above run-cost of ~95K do-nothing baseline
     # and competitive with running costs of ~100-200K.
     "shortage_cost": 8000.0,
-    # Safety layer already prevents most violations; keep a meaningful but
-    # non-dominating penalty.
-    "violation_cost": 1000.0,
+    # Safety layer already prevents most violations; keep this non-dominating
+    # so learning focuses on profit/capacity tradeoffs.
+    "violation_cost": 500.0,
+    "crude_efficiency_bonus": 500.0,
     "reward_scale": ALGO_CONFIG["reward_scale"],
 }
 

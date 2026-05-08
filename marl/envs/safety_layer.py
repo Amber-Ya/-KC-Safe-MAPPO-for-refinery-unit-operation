@@ -31,7 +31,10 @@ class SafetyLayer:
         downstream = self._downstream_available_capacity(state, agent_id)
         for idx in range(1, n_actions):  # level 0 (off) always allowed
             load = self.index_to_load(agent_id, idx)
+            effective_max = self._effective_capacity_max(state, agent_id)
             if upstream <= 1e-8 or downstream <= 1e-8:
+                mask[idx] = 0.0
+            elif load > effective_max + 1e-6:
                 mask[idx] = 0.0
             elif load > upstream + 1e-6:
                 mask[idx] = 0.0
@@ -80,7 +83,9 @@ class SafetyLayer:
     ) -> float:
         load = max(0.0, float(proposed_load))
         cap_min = float(self.units[unit].get("capacity_min", 0.0))
-        cap_max = float(self.units[unit].get("capacity_max", 0.0))
+        cap_max = self._effective_capacity_max(state, unit)
+        if cap_max < cap_min - 1e-8:
+            return 0.0
         load = min(load, cap_max)
         if 0.0 < load < cap_min:
             load = cap_min
@@ -120,10 +125,10 @@ class SafetyLayer:
                 self.config.get("crude_purchase_max_per_period", 0.0)
             )
         if unit == "DFHC":
-            direct = self._cdu_output("distillate_buffer", proposed_loads)
+            direct = self._cdu_output(state, "distillate_buffer", proposed_loads)
             return float(inv.get("distillate_buffer", 0.0)) + direct
         if unit in ("FCC1", "FCC2"):
-            direct = self._cdu_output("fcc_feed_buffer", proposed_loads)
+            direct = self._cdu_output(state, "fcc_feed_buffer", proposed_loads)
             return float(inv.get("fcc_feed_buffer", 0.0)) + 0.5 * direct
         if unit == "ROHU":
             return float(inv.get("residual_buffer", 0.0))
@@ -154,14 +159,31 @@ class SafetyLayer:
         return downstream_capacity / tracked_yield
 
     def _cdu_output(
-        self, output_node: str, proposed_loads: Mapping[str, float] | None = None
+        self,
+        state: Mapping[str, Any],
+        output_node: str,
+        proposed_loads: Mapping[str, float] | None = None,
     ) -> float:
         if proposed_loads is None:
             return 0.0
         amount = 0.0
         for cdu in ("CDU1", "CDU2"):
-            amount += float(self.yields.get(cdu, {}).get(output_node, 0.0)) * float(proposed_loads.get(cdu, 0.0))
+            multiplier = (
+                state.get("yield_multipliers", {})
+                .get(cdu, {})
+                .get(output_node, 1.0)
+            )
+            amount += (
+                float(self.yields.get(cdu, {}).get(output_node, 0.0))
+                * float(multiplier)
+                * float(proposed_loads.get(cdu, 0.0))
+            )
         return amount
+
+    def _effective_capacity_max(self, state: Mapping[str, Any], unit: str) -> float:
+        cap_max = float(self.units[unit].get("capacity_max", 0.0))
+        availability = float(state.get("unit_availability", {}).get(unit, 1.0))
+        return cap_max * max(0.0, min(1.0, availability))
 
     def _primary_output_nodes(self, unit: str) -> list[str]:
         if unit not in ("CDU1", "CDU2"):

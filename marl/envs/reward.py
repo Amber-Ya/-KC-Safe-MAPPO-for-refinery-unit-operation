@@ -47,9 +47,11 @@ class RewardCalculator:
         # --- Revenue ---
         if product_sales:
             product_grades = self.config.get("prices", {}).get("product_grades", {})
+            price_multipliers = state.get("price_multipliers", {})
             revenue = sum(
                 float(product_sales.get(product, 0.0))
                 * float(product_grades.get(product, {}).get("price", 0.0))
+                * float(price_multipliers.get(product, 1.0))
                 for product in product_grades
             )
         else:
@@ -59,8 +61,10 @@ class RewardCalculator:
             )
 
         # --- Costs ---
-        crude_cost = float(transition_info.get("crude_purchase", 0.0)) * float(
-            self.config.get("crude_average_price", 0.0)
+        crude_cost = (
+            float(transition_info.get("crude_purchase", 0.0))
+            * float(self.config.get("crude_average_price", 0.0))
+            * float(state.get("crude_price_multiplier", 1.0))
         )
         energy_cost = sum(
             float(unit_loads[u]) * float(self.utility_costs.get(u, 0.0)) for u in self.agents

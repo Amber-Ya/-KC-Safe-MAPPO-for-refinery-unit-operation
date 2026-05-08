@@ -50,6 +50,8 @@ class KCSafeMAPPOTrainer:
         self.optimizer = torch.optim.Adam(params, lr=float(self.config["learning_rate"]))
         self._current_entropy_coef = float(self.config["entropy_coef"])
         self.last_losses: Dict[str, float] = {}
+        self.best_training_profit = -float("inf")
+        self.best_checkpoint_path: str | None = None
 
     def select_actions(self, obs: Mapping[str, np.ndarray]) -> Dict[str, Any]:
         actions: Dict[str, int] = {}
@@ -201,6 +203,8 @@ class KCSafeMAPPOTrainer:
         obs = self.env.reset(seed=self.seed)
         rollout_length = int(self.config["rollout_length"])
         logs: list[Dict[str, float]] = []
+        self.best_training_profit = -float("inf")
+        self.best_checkpoint_path = os.path.join(output_dir, "kc_safe_mappo_best.pt")
         env_steps = 0
         episode = 0
         entropy_start = float(self.config["entropy_coef"])
@@ -238,6 +242,13 @@ class KCSafeMAPPOTrainer:
                 "unit_switch_count": int(metrics["unit_switch_count"]),
                 **losses,
             }
+            if current_rollout == rollout_length and row["profit"] > self.best_training_profit:
+                self.best_training_profit = float(row["profit"])
+                self.save_checkpoint(self.best_checkpoint_path)
+                row["is_best"] = 1
+            else:
+                row["is_best"] = 0
+            row["best_profit"] = self.best_training_profit
             logs.append(row)
             self._write_logs(os.path.join(output_dir, "training_log.csv"), logs)
         self.save_checkpoint(os.path.join(output_dir, "kc_safe_mappo_checkpoint.pt"))

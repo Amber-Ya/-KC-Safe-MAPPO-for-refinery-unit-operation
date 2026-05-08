@@ -5,6 +5,7 @@ from config import CASE_DATA
 import config
 from marl.envs.refinery_env import RefinerySchedulingEnv
 from marl.utils.config_adapter import ConfigAdapter
+from marl.utils.uncertainty import apply_uncertainty_profile
 
 
 def make_env(seed: int = 7) -> RefinerySchedulingEnv:
@@ -27,3 +28,14 @@ def test_reset_initializes_inventory_and_loads() -> None:
     for unit, load in env.state["unit_loads"].items():
         assert load == 0.0
         assert load <= float(CASE_DATA["units"][unit]["capacity_max"])
+
+
+def test_uncertain_reset_samples_multipliers_and_step_profit() -> None:
+    env_config = apply_uncertainty_profile(ConfigAdapter(config).build_env_config(), "moderate")
+    env = RefinerySchedulingEnv(env_config, seed=13)
+    env.reset(seed=13)
+    demand_multipliers = env.state["demand_multipliers"]
+    assert any(abs(value - 1.0) > 1e-8 for value in demand_multipliers.values())
+    assert all(0.0 < value <= 1.0 for value in env.state["unit_availability"].values())
+    _, _, _, info = env.step({agent: 1 for agent in env.agents})
+    assert "profit" in info

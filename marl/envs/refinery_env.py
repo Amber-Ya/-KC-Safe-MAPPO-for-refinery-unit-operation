@@ -24,6 +24,7 @@ class RefinerySchedulingEnv:
         reward_config: Dict[str, float] | None = None,
     ):
         self.config = env_config
+        self.uncertainty_config = dict(env_config.get("uncertainty", {"enabled": False}))
         self.agents = list(env_config["agents"])
         self.num_agents = len(self.agents)
         self.horizon = int(env_config["time"]["num_periods"])
@@ -50,16 +51,22 @@ class RefinerySchedulingEnv:
             pool: float(info.get("init", 0.0))
             for pool, info in self.config["product_pools"].items()
         }
+        uncertainty = self._sample_uncertainty_trajectory()
         self.state = {
             "t": 0,
             "inventories": inventories,
             "product_pools": product_pools,
             "unit_loads": {agent: 0.0 for agent in self.agents},
             "last_unit_loads": {agent: 0.0 for agent in self.agents},
-            "unit_availability": {agent: 1.0 for agent in self.agents},
+            "unit_availability": uncertainty["unit_availability"][0],
             "load_level_indices": {agent: 0 for agent in self.agents},
             "last_actions": {agent: 1 for agent in self.agents},
             "switch_flags": {agent: 0.0 for agent in self.agents},
+            "uncertainty": uncertainty,
+            "demand_multipliers": uncertainty["demand_multipliers"][0],
+            "price_multipliers": uncertainty["price_multipliers"][0],
+            "yield_multipliers": uncertainty["yield_multipliers"][0],
+            "crude_price_multiplier": uncertainty["crude_price_multipliers"][0],
             "cumulative_delivery": {pool: 0.0 for pool in self.config["product_pools"]},
             "cumulative_product_sales": {
                 product: 0.0
@@ -125,6 +132,8 @@ class RefinerySchedulingEnv:
             self.state["cumulative_product_sales"][product] += float(amount)
 
         done = self.state["t"] >= self.horizon
+        if not done:
+            self._advance_uncertainty_state()
         next_obs = {agent: self.build_observation(agent) for agent in self.agents}
         dones = {agent: done for agent in self.agents}
         dones["__all__"] = done
@@ -140,6 +149,13 @@ class RefinerySchedulingEnv:
             "product_sales": blending_info["product_sales"],
             "shortage": blending_info["shortage"],
             "demand": demand,
+            "uncertainty": {
+                "demand_multipliers": previous_state.get("demand_multipliers", {}),
+                "price_multipliers": previous_state.get("price_multipliers", {}),
+                "yield_multipliers": previous_state.get("yield_multipliers", {}),
+                "crude_price_multiplier": previous_state.get("crude_price_multiplier", 1.0),
+                "unit_availability": previous_state.get("unit_availability", {}),
+            },
             "demand_satisfaction_rate": blending_info["demand_satisfaction_rate"],
             "inventory_violation_count": routing_info["violation_count"],
             "unit_switch_count": int(sum(switch_flags.values())),
@@ -157,6 +173,10 @@ class RefinerySchedulingEnv:
         values.extend(self._normalized_product_pool(pool) for pool in self.config["product_pools"])
         current_demand = self._current_demand()
         values.extend(current_demand[pool] / max(1.0, float(self.config["product_pools"][pool].get("max", 1.0))) for pool in self.config["product_pools"])
+        values.extend(float(self.state.get("demand_multipliers", {}).get(pool, 1.0)) for pool in self.config["product_pools"])
+        values.extend(self._pool_price_multiplier(pool) for pool in self.config["product_pools"])
+        values.append(float(self.state.get("crude_price_multiplier", 1.0)))
+        values.extend(self._unit_yield_multiplier(agent) for agent in self.agents)
         values.extend(float(self.state["last_actions"][agent]) / 2.0 for agent in self.agents)
         values.extend(float(self.state["switch_flags"][agent]) for agent in self.agents)
         return np.asarray(values, dtype=np.float32)
@@ -181,6 +201,10 @@ class RefinerySchedulingEnv:
         demand = self._current_demand()
         for pool in self.config["product_pools"]:
             values.append(demand[pool] / max(1.0, float(self.config["product_pools"][pool].get("max", 1.0))))
+            values.append(float(self.state.get("demand_multipliers", {}).get(pool, 1.0)))
+            values.append(self._pool_price_multiplier(pool) if pool in demand_set else 1.0)
+        values.append(float(self.state.get("crude_price_multiplier", 1.0)))
+        values.append(self._unit_yield_multiplier(agent_id))
         for unit in self.agents:
             relevance = 1.0 if unit in neighbor_set or unit == agent_id else 0.0
             values.extend([self.state["unit_loads"][unit] / self._capacity_max(unit), relevance])
@@ -195,7 +219,8 @@ class RefinerySchedulingEnv:
         remaining_periods = max(1, self.horizon - int(self.state.get("t", 0)))
         for group in self.config.get("demands", {}).values():
             pool = group["pool"]
-            total_min = float(group.get("base_min_total", 0.0))
+            multiplier = float(self.state.get("demand_multipliers", {}).get(pool, 1.0))
+            total_min = float(group.get("base_min_total", 0.0)) * multiplier
             already_delivered = float(self.state.get("cumulative_delivery", {}).get(pool, 0.0))
             demand[pool] += max(0.0, total_min - already_delivered) / remaining_periods
         return demand
@@ -206,9 +231,105 @@ class RefinerySchedulingEnv:
         for group in self.config.get("demands", {}).values():
             pool = group["pool"]
             total_max = float(group.get("demand_max_total", float("inf")))
+            if total_max < float("inf"):
+                total_max *= float(self.state.get("demand_multipliers", {}).get(pool, 1.0))
             already_delivered = self.state.get("cumulative_delivery", {}).get(pool, 0.0)
             demand_max[pool] = max(0.0, total_max - already_delivered)
         return demand_max
+
+    def _sample_uncertainty_trajectory(self) -> Dict[str, Any]:
+        products = self.config.get("prices", {}).get("product_grades", {})
+        pools = list(self.config["product_pools"])
+        enabled = bool(self.uncertainty_config.get("enabled", False))
+        if not enabled:
+            return {
+                "demand_multipliers": [{pool: 1.0 for pool in pools} for _ in range(self.horizon)],
+                "price_multipliers": [{product: 1.0 for product in products} for _ in range(self.horizon)],
+                "yield_multipliers": [self._unit_yield_multiplier_defaults() for _ in range(self.horizon)],
+                "crude_price_multipliers": [1.0 for _ in range(self.horizon)],
+                "unit_availability": [{agent: 1.0 for agent in self.agents} for _ in range(self.horizon)],
+            }
+
+        demand_std = float(self.uncertainty_config.get("demand_std", 0.0))
+        price_std = float(self.uncertainty_config.get("price_std", 0.0))
+        yield_std = float(self.uncertainty_config.get("yield_std", 0.0))
+        crude_std = float(self.uncertainty_config.get("crude_price_std", 0.0))
+        outage_prob = float(self.uncertainty_config.get("unit_outage_prob", 0.0))
+        derate_min = float(self.uncertainty_config.get("unit_derate_min", 0.6))
+
+        demand_multipliers = []
+        price_multipliers = []
+        yield_multipliers = []
+        crude_price_multipliers = []
+        unit_availability = []
+        for _ in range(self.horizon):
+            demand_multipliers.append({
+                pool: self._clipped_normal(1.0, demand_std, 0.65, 1.45)
+                for pool in pools
+            })
+            price_multipliers.append({
+                product: self._clipped_normal(1.0, price_std, 0.70, 1.35)
+                for product in products
+            })
+            yield_multipliers.append(self._sample_yield_multipliers(yield_std))
+            crude_price_multipliers.append(self._clipped_normal(1.0, crude_std, 0.75, 1.35))
+            unit_availability.append({
+                agent: (
+                    float(self.rng.uniform(derate_min, 0.85))
+                    if self.rng.random() < outage_prob
+                    else 1.0
+                )
+                for agent in self.agents
+            })
+
+        return {
+            "demand_multipliers": demand_multipliers,
+            "price_multipliers": price_multipliers,
+            "yield_multipliers": yield_multipliers,
+            "crude_price_multipliers": crude_price_multipliers,
+            "unit_availability": unit_availability,
+        }
+
+    def _advance_uncertainty_state(self) -> None:
+        t = int(self.state["t"])
+        uncertainty = self.state["uncertainty"]
+        self.state["unit_availability"] = uncertainty["unit_availability"][t]
+        self.state["demand_multipliers"] = uncertainty["demand_multipliers"][t]
+        self.state["price_multipliers"] = uncertainty["price_multipliers"][t]
+        self.state["yield_multipliers"] = uncertainty["yield_multipliers"][t]
+        self.state["crude_price_multiplier"] = uncertainty["crude_price_multipliers"][t]
+
+    def _clipped_normal(self, mean: float, std: float, low: float, high: float) -> float:
+        if std <= 1e-12:
+            return float(mean)
+        return float(np.clip(self.rng.normal(mean, std), low, high))
+
+    def _unit_yield_multiplier_defaults(self) -> Dict[str, Dict[str, float]]:
+        multipliers: Dict[str, Dict[str, float]] = {}
+        for unit, yields in self.config["yields"].items():
+            if unit == "ROHU" and isinstance(yields, dict) and "residue_hydrotreating" in yields:
+                flat_yields = yields["residue_hydrotreating"]
+            else:
+                flat_yields = yields
+            if isinstance(flat_yields, dict):
+                multipliers[unit] = {
+                    node: 1.0
+                    for node, coeff in flat_yields.items()
+                    if node != "byproduct_or_untracked" and float(coeff) > 0.0
+                }
+        return multipliers
+
+    def _sample_yield_multipliers(self, std: float) -> Dict[str, Dict[str, float]]:
+        defaults = self._unit_yield_multiplier_defaults()
+        if std <= 1e-12:
+            return defaults
+        return {
+            unit: {
+                node: self._clipped_normal(1.0, std, 0.75, 1.15)
+                for node in nodes
+            }
+            for unit, nodes in defaults.items()
+        }
 
     def _local_context(self, agent_id: str) -> tuple[list[str], list[str], list[str], list[str]]:
         if agent_id in ("CDU1", "CDU2"):
@@ -258,3 +379,19 @@ class RefinerySchedulingEnv:
 
     def _capacity_max(self, unit: str) -> float:
         return max(1.0, float(self.config["units"][unit].get("capacity_max", 1.0)))
+
+    def _pool_price_multiplier(self, pool: str) -> float:
+        product_grades = self.config.get("prices", {}).get("product_grades", {})
+        multipliers = [
+            float(self.state.get("price_multipliers", {}).get(product, 1.0))
+            for product, info in product_grades.items()
+            if info.get("pool") == pool
+        ]
+        return float(sum(multipliers) / len(multipliers)) if multipliers else 1.0
+
+    def _unit_yield_multiplier(self, unit: str) -> float:
+        multipliers = [
+            float(value)
+            for value in self.state.get("yield_multipliers", {}).get(unit, {}).values()
+        ]
+        return float(sum(multipliers) / len(multipliers)) if multipliers else 1.0

@@ -22,7 +22,7 @@ ALGO_CONFIG = {
 }
 
 REWARD_CONFIG = {
-    "alpha": 0.7,
+    "alpha": 0.95,
     "switch_cost": 50.0,
     # Shortage penalty must make 'do nothing' strictly more expensive than
     # running.  Full shutdown shortage ≈ 30.63 total demand units.

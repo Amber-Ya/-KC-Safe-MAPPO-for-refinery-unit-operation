@@ -48,9 +48,8 @@ class FlowRouter:
             actual_loads[cdu] = load
             total_crude_available -= load
             flows[("crude_tanks", cdu)] = load
-            yields = self.yields.get(cdu, {})
             for node in ["naphtha_buffer", "distillate_buffer", "fcc_feed_buffer", "residual_buffer"]:
-                amount = float(yields.get(node, 0.0)) * load
+                amount = self._yield(cdu, node, state) * load
                 if node in ("distillate_buffer", "fcc_feed_buffer"):
                     cdu_outputs[node] += amount
                 else:
@@ -100,7 +99,7 @@ class FlowRouter:
         flows[("distillate_buffer", "DHC")] = distillate_to_dhc
 
         for unit in ("DFHC", "FCC1", "FCC2", "ROHU", "DHC"):
-            self._route_secondary_outputs(unit, actual_loads.get(unit, 0.0), inv, flows)
+            self._route_secondary_outputs(unit, actual_loads.get(unit, 0.0), inv, flows, state)
 
         naphtha_to_component = min(
             inv.get("naphtha_buffer", 0.0),
@@ -132,7 +131,12 @@ class FlowRouter:
         return direct_use + buffer_use, buffer_use, direct_use
 
     def _route_secondary_outputs(
-        self, unit: str, load: float, inv: Dict[str, float], flows: Dict[FlowKey, float]
+        self,
+        unit: str,
+        load: float,
+        inv: Dict[str, float],
+        flows: Dict[FlowKey, float],
+        state: Mapping[str, Any],
     ) -> None:
         yields = self.yields.get(unit, {})
         if unit == "ROHU" and isinstance(yields, dict) and "residue_hydrotreating" in yields:
@@ -142,9 +146,22 @@ class FlowRouter:
         for node, coeff in yields.items():
             if node == "byproduct_or_untracked":
                 continue
-            amount = float(coeff) * load
+            amount = self._yield(unit, node, state) * load
             accepted = self._add_inventory(inv, node, amount)
             flows[(unit, node)] = accepted
+
+    def _yield(self, unit: str, node: str, state: Mapping[str, Any]) -> float:
+        yields = self.yields.get(unit, {})
+        if unit == "ROHU" and isinstance(yields, dict) and "residue_hydrotreating" in yields:
+            yields = yields["residue_hydrotreating"]
+        if not isinstance(yields, dict):
+            return 0.0
+        multiplier = (
+            state.get("yield_multipliers", {})
+            .get(unit, {})
+            .get(node, 1.0)
+        )
+        return float(yields.get(node, 0.0)) * float(multiplier)
 
     def _add_inventory(self, inv: Dict[str, float], node: str, amount: float) -> float:
         amount = max(0.0, float(amount))

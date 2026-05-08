@@ -16,6 +16,7 @@ from marl.algorithms.kc_safe_mappo import KCSafeMAPPOTrainer
 from marl.configs.algo_config import ALGO_CONFIG
 from marl.envs.refinery_env import RefinerySchedulingEnv
 from marl.utils.config_adapter import ConfigAdapter
+from marl.utils.uncertainty import apply_uncertainty_profile
 
 
 def load_config_module(path: str) -> ModuleType:
@@ -36,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", default="results/marl", help="Directory for MARL logs and checkpoints.")
     parser.add_argument("--rollout_length", type=int, default=None, help="Override rollout length.")
     parser.add_argument("--ppo_epochs", type=int, default=None, help="Override PPO epochs.")
+    parser.add_argument(
+        "--uncertainty_profile",
+        default="none",
+        choices=("none", "moderate", "stress"),
+        help="Enable stochastic environment perturbations for training.",
+    )
     return parser.parse_args()
 
 
@@ -43,6 +50,7 @@ def main() -> int:
     args = parse_args()
     config_module = load_config_module(args.config)
     env_config = ConfigAdapter(config_module).build_env_config()
+    env_config = apply_uncertainty_profile(env_config, args.uncertainty_profile)
     env = RefinerySchedulingEnv(env_config, seed=args.seed)
     algo_config = dict(ALGO_CONFIG)
     if args.rollout_length is not None:
